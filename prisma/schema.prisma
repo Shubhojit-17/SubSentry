@@ -1,0 +1,185 @@
+// Prisma Schema for SubSentry
+// Autonomous Procurement & Vendor Negotiation Assistant
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  passwordHash String?       // Optional for OAuth users
+  googleId     String?       @unique
+  name         String?
+  image        String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  
+  transactions   Transaction[]
+  negotiations   Negotiation[]
+  oauthTokens    OAuthToken[]
+  gmailMessages  GmailMessage[]
+  subscriptions  Subscription[]
+  
+  @@map("users")
+}
+
+model OAuthToken {
+  id              String   @id @default(cuid())
+  userId          String
+  provider        String   @default("google")
+  accessToken     String   @db.Text
+  refreshToken    String?  @db.Text
+  expiresAt       DateTime
+  scope           String?
+  lastHistoryId   String?  // Gmail history ID for incremental sync
+  lastGmailSyncAt DateTime? // Last time Gmail was scanned
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, provider])
+  @@index([userId])
+  @@map("oauth_tokens")
+}
+
+model GmailMessage {
+  id            String   @id @default(cuid())
+  userId        String
+  gmailId       String   @unique  // Gmail message ID
+  threadId      String?
+  subject       String?
+  sender        String?           // From email address
+  senderDomain  String?           // Extracted domain for vendor matching
+  snippet       String?  @db.Text // Email preview text
+  date          DateTime?
+  hasAttachment Boolean  @default(false)
+  isRenewal     Boolean  @default(false)
+  processedAt   DateTime @default(now())
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([isRenewal])
+  @@index([senderDomain])
+  @@map("gmail_messages")
+}
+
+// ============================================================================
+// VENDOR - Entity representing a SaaS company/tool
+// ============================================================================
+model Vendor {
+  id             String   @id @default(cuid())
+  name           String   @unique
+  normalizedName String   // Lowercase, trimmed for matching
+  domain         String?  // e.g., "slack.com", "notion.so"
+  category       String?  // e.g., "Communication", "Design", "DevOps"
+  logo           String?  // URL to vendor logo
+  website        String?  // Vendor website URL
+  isSaaS         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  subscriptions  Subscription[]
+  transactions   Transaction[]
+  negotiations   Negotiation[]
+  
+  @@index([normalizedName])
+  @@index([domain])
+  @@map("vendors")
+}
+
+// ============================================================================
+// SUBSCRIPTION - User's relationship with a vendor (detected from Gmail/CSV)
+// ============================================================================
+model Subscription {
+  id              String    @id @default(cuid())
+  userId          String
+  vendorId        String
+  source          String    // "gmail" | "csv"
+  renewalDate     DateTime?
+  billingCycle    String?   // "monthly" | "yearly" | "quarterly"
+  amount          Decimal?  @db.Decimal(12, 2)
+  currency        String    @default("USD")
+  confidenceScore String    @default("medium") // "high" | "medium" | "low"
+  lastDetectedAt  DateTime  @default(now())
+  gmailMessageId  String?   // Link to source email if from Gmail
+  status          String    @default("active") // "active" | "cancelled" | "pending"
+  notes           String?   @db.Text
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+  
+  @@unique([userId, vendorId, source]) // One subscription per vendor per source per user
+  @@index([userId])
+  @@index([vendorId])
+  @@index([renewalDate])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Transaction {
+  id             String   @id @default(cuid())
+  userId         String
+  vendorId       String
+  amount         Decimal  @db.Decimal(12, 2)
+  date           DateTime
+  frequency      String   // "monthly" | "annual" | "one-time"
+  rawDescription String   // Original CSV description
+  createdAt      DateTime @default(now())
+  
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vendor Vendor @relation(fields: [vendorId], references: [id])
+  
+  @@index([userId])
+  @@index([vendorId])
+  @@index([date])
+  @@map("transactions")
+}
+
+model Negotiation {
+  id             String    @id @default(cuid())
+  userId         String
+  vendorId       String
+  strategy       String    // "seat_reduction" | "tier_downgrade" | "annual_prepay"
+  draftEmail     String    @db.Text
+  finalEmail     String?   @db.Text
+  recipientEmail String?
+  status         String    @default("draft") // "draft" | "approved" | "sent" | "responded" | "closed"
+  renewalDate    DateTime?
+  sentAt         DateTime?
+  gmailMessageId String?   // Gmail message ID when sent via Gmail API
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vendor  Vendor   @relation(fields: [vendorId], references: [id])
+  savings Saving[]
+  
+  @@index([userId])
+  @@index([vendorId])
+  @@index([status])
+  @@map("negotiations")
+}
+
+model Saving {
+  id              String      @id @default(cuid())
+  negotiationId   String
+  estimatedAmount Decimal     @db.Decimal(12, 2)
+  confirmedAmount Decimal?    @db.Decimal(12, 2)
+  notes           String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  
+  negotiation Negotiation @relation(fields: [negotiationId], references: [id], onDelete: Cascade)
+  
+  @@map("savings")
+}
