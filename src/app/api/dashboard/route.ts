@@ -105,6 +105,17 @@ export async function GET() {
             scannedEmails,
         });
 
+        // Debug: Log subscription details to help diagnose issue
+        console.log('[Dashboard] Subscription details:', subscriptions.map(s => ({
+            id: s.id,
+            vendorName: s.vendor.name,
+            amount: s.amount,
+            renewalDate: s.renewalDate,
+            plan: (s as { plan?: string }).plan,
+            seats: (s as { seats?: number }).seats,
+            billingCycle: s.billingCycle,
+        })));
+
         return NextResponse.json({
             vendors: {
                 total: vendorCount,

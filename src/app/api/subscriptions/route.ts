@@ -51,6 +51,8 @@ export async function GET(request: NextRequest) {
                 source: s.source,
                 renewalDate: s.renewalDate,
                 billingCycle: s.billingCycle,
+                plan: s.plan,
+                seats: s.seats,
                 amount: s.amount ? parseFloat(s.amount.toString()) : null,
                 currency: s.currency,
                 confidenceScore: s.confidenceScore,

@@ -5,6 +5,8 @@ import { useSession } from 'next-auth/react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import Navbar from '@/components/Navbar';
+import IntelligenceCard from '@/components/IntelligenceCard';
+import AlternativesPanel from '@/components/AlternativesPanel';
 
 interface SubscriptionDetail {
     id: string;
@@ -14,9 +16,12 @@ interface SubscriptionDetail {
     vendorLogo: string | null;
     vendorCategory: string | null;
     vendorWebsite: string | null;
+    vendorType?: 'FIXED_PLAN' | 'NEGOTIABLE';
     source: string;
     renewalDate: string | null;
     billingCycle: string | null;
+    plan: string | null;
+    seats: number | null;
     amount: number | null;
     currency: string;
     confidenceScore: string;
@@ -40,6 +45,21 @@ interface Alternative {
     category: string;
     strengths: string[];
     bestFor: string;
+    whyBetter: string;
+}
+
+interface Intelligence {
+    id: string;
+    subscriptionId: string;
+    vendorId: string;
+    vendorType: 'FIXED_PLAN' | 'NEGOTIABLE';
+    valueSummary: string;
+    assumptions: string[];
+    alternatives: Alternative[];
+    negotiationEmail: string | null;
+    negotiationSubject: string | null;
+    analyzedAt: string;
+    regeneratedAt: string | null;
 }
 
 export default function SubscriptionDetailPage() {
@@ -48,9 +68,9 @@ export default function SubscriptionDetailPage() {
     const params = useParams();
     const [subscription, setSubscription] = useState<SubscriptionDetail | null>(null);
     const [emailContext, setEmailContext] = useState<EmailContext | null>(null);
-    const [alternatives, setAlternatives] = useState<Alternative[]>([]);
+    const [intelligence, setIntelligence] = useState<Intelligence | null>(null);
     const [loading, setLoading] = useState(true);
-    const [researching, setResearching] = useState(false);
+    const [intelligenceLoading, setIntelligenceLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
@@ -79,6 +99,9 @@ export default function SubscriptionDetailPage() {
             const data = await res.json();
             setSubscription(data.subscription);
             setEmailContext(data.emailContext);
+
+            // Fetch cached intelligence (non-blocking)
+            fetchIntelligence(data.subscription.id, false);
         } catch (err) {
             setError('Failed to load subscription');
             console.error(err);
@@ -87,34 +110,34 @@ export default function SubscriptionDetailPage() {
         }
     };
 
-    const handleResearchAlternatives = async () => {
-        if (!subscription) return;
-
+    const fetchIntelligence = async (subscriptionId: string, forceRegenerate: boolean) => {
         try {
-            setResearching(true);
-            const res = await fetch('/api/research', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    vendorId: subscription.vendorId,
-                    vendorName: subscription.vendorName,
-                    category: subscription.vendorCategory,
-                }),
+            setIntelligenceLoading(true);
+
+            const url = forceRegenerate
+                ? '/api/intelligence'
+                : `/api/intelligence?subscriptionId=${subscriptionId}`;
+
+            const res = await fetch(url, {
+                method: forceRegenerate ? 'POST' : 'GET',
+                headers: forceRegenerate ? { 'Content-Type': 'application/json' } : undefined,
+                body: forceRegenerate ? JSON.stringify({ subscriptionId }) : undefined,
             });
 
-            if (!res.ok) {
+            if (res.ok) {
                 const data = await res.json();
-                throw new Error(data.error || 'Failed to research');
+                setIntelligence(data);
             }
-
-            const data = await res.json();
-            setAlternatives(data.alternatives);
         } catch (err) {
-            console.error('Research error:', err);
-            setError(err instanceof Error ? err.message : 'Failed to research alternatives');
+            console.error('Failed to fetch intelligence:', err);
         } finally {
-            setResearching(false);
+            setIntelligenceLoading(false);
         }
+    };
+
+    const handleReanalyze = async () => {
+        if (!subscription) return;
+        await fetchIntelligence(subscription.id, true);
     };
 
     const formatCurrency = (amount: number | null, currency: string) => {
@@ -152,6 +175,8 @@ export default function SubscriptionDetailPage() {
         return null;
     }
 
+    const vendorType = intelligence?.vendorType || 'NEGOTIABLE';
+
     return (
         <div className="min-h-screen bg-dark">
             <Navbar />
@@ -181,7 +206,19 @@ export default function SubscriptionDetailPage() {
                                 </div>
                             )}
                             <div>
-                                <h1 className="text-2xl font-bold text-white">{subscription.vendorName}</h1>
+                                <div className="flex items-center gap-3">
+                                    <h1 className="text-2xl font-bold text-white">{subscription.vendorName}</h1>
+                                    {intelligence && (
+                                        <span
+                                            className={`px-2 py-1 text-xs font-medium rounded-full ${vendorType === 'NEGOTIABLE'
+                                                    ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                                                    : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                                                }`}
+                                        >
+                                            {vendorType === 'NEGOTIABLE' ? '💰 Negotiable' : '📋 Fixed Plan'}
+                                        </span>
+                                    )}
+                                </div>
                                 <div className="flex items-center gap-3 mt-1 text-gray-400">
                                     {subscription.vendorCategory && (
                                         <span>{subscription.vendorCategory}</span>
@@ -192,33 +229,15 @@ export default function SubscriptionDetailPage() {
                                 </div>
                             </div>
                         </div>
-                        <div className="flex gap-2">
-                            <button
-                                onClick={handleResearchAlternatives}
-                                disabled={researching}
-                                className="btn btn-secondary flex items-center gap-2"
-                            >
-                                {researching ? (
-                                    <>
-                                        <div className="spinner w-4 h-4" />
-                                        Researching...
-                                    </>
-                                ) : (
-                                    <>
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                                        </svg>
-                                        Research Alternatives
-                                    </>
-                                )}
-                            </button>
+                        {/* Show Negotiate button only for NEGOTIABLE vendors */}
+                        {vendorType === 'NEGOTIABLE' && (
                             <Link
-                                href={`/negotiate?vendorId=${subscription.vendorId}`}
+                                href={`/negotiate/${subscription.vendorId}?subscriptionId=${subscription.id}`}
                                 className="btn btn-primary"
                             >
-                                Negotiate
+                                💬 Negotiate
                             </Link>
-                        </div>
+                        )}
                     </div>
                 </div>
 
@@ -227,6 +246,14 @@ export default function SubscriptionDetailPage() {
                     <div className="card p-6">
                         <h3 className="text-gray-400 text-sm mb-4">Subscription Details</h3>
                         <dl className="space-y-4">
+                            <div>
+                                <dt className="text-gray-500 text-sm">Plan</dt>
+                                <dd className="text-white text-lg">{subscription.plan || '—'}</dd>
+                            </div>
+                            <div>
+                                <dt className="text-gray-500 text-sm">Seats</dt>
+                                <dd className="text-white text-lg">{subscription.seats || '—'}</dd>
+                            </div>
                             <div>
                                 <dt className="text-gray-500 text-sm">Renewal Date</dt>
                                 <dd className="text-white text-lg">{formatDate(subscription.renewalDate)}</dd>
@@ -271,6 +298,39 @@ export default function SubscriptionDetailPage() {
                     </div>
                 </div>
 
+                {/* AI Intelligence Card */}
+                {intelligence ? (
+                    <div className="mb-6">
+                        <IntelligenceCard
+                            vendorType={intelligence.vendorType}
+                            valueSummary={intelligence.valueSummary}
+                            assumptions={intelligence.assumptions}
+                            analyzedAt={intelligence.analyzedAt}
+                            regeneratedAt={intelligence.regeneratedAt}
+                            onReanalyze={handleReanalyze}
+                            isLoading={intelligenceLoading}
+                        />
+                    </div>
+                ) : intelligenceLoading ? (
+                    <div className="bg-gray-800/50 rounded-xl p-6 border border-gray-700 mb-6">
+                        <div className="flex items-center gap-3">
+                            <div className="spinner w-5 h-5" />
+                            <span className="text-gray-400">Generating AI analysis...</span>
+                        </div>
+                    </div>
+                ) : null}
+
+                {/* Alternatives Panel */}
+                {intelligence && intelligence.alternatives.length > 0 && (
+                    <div className="mb-6">
+                        <AlternativesPanel
+                            alternatives={intelligence.alternatives}
+                            currentVendor={subscription.vendorName}
+                            currentAmount={subscription.amount}
+                        />
+                    </div>
+                )}
+
                 {/* Email Context */}
                 {emailContext && (
                     <div className="card p-6 mb-6">
@@ -282,42 +342,6 @@ export default function SubscriptionDetailPage() {
                             </div>
                             <h4 className="text-white font-medium mb-2">{emailContext.subject}</h4>
                             <p className="text-gray-400 text-sm">{emailContext.snippet}</p>
-                        </div>
-                    </div>
-                )}
-
-                {/* Alternatives */}
-                {alternatives.length > 0 && (
-                    <div className="card p-6">
-                        <h3 className="text-gray-400 text-sm mb-4">Alternative Tools</h3>
-                        <div className="space-y-4">
-                            {alternatives.map((alt, idx) => (
-                                <div key={idx} className="bg-dark-lighter rounded-lg p-4">
-                                    <div className="flex items-start justify-between">
-                                        <div>
-                                            <h4 className="text-white font-medium">{alt.name}</h4>
-                                            <p className="text-gray-500 text-sm">{alt.category}</p>
-                                        </div>
-                                        <span className="text-primary font-mono text-sm">{alt.priceRange}</span>
-                                    </div>
-                                    <p className="text-gray-400 text-sm mt-2">{alt.bestFor}</p>
-                                    <div className="flex flex-wrap gap-2 mt-3">
-                                        {alt.strengths.map((s, i) => (
-                                            <span key={i} className="px-2 py-1 bg-dark rounded text-xs text-gray-400">
-                                                {s}
-                                            </span>
-                                        ))}
-                                    </div>
-                                    <a
-                                        href={alt.website}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-primary hover:text-primary-light text-sm mt-3 inline-block"
-                                    >
-                                        Visit Website →
-                                    </a>
-                                </div>
-                            ))}
                         </div>
                     </div>
                 )}

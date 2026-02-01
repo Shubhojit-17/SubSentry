@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
 
         // Call Gemini for research
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+        const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite' });
 
         const prompt = `You are a SaaS procurement expert. Research alternatives to ${targetVendor}${targetCategory ? ` (Category: ${targetCategory})` : ''}.
 

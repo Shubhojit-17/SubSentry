@@ -5,6 +5,7 @@
 
 import { google, gmail_v1 } from 'googleapis';
 import prisma from './prisma';
+import { extractSubscriptionFromEmail, resolveVendorName, getVendorCategory } from './subscription-extraction';
 
 // ============================================================================
 // LOGGING
@@ -293,6 +294,8 @@ export async function scanInbox(userId: string, maxResults: number = 10): Promis
 
 /**
  * Process a single message and detect subscriptions
+ * Stage 1: Fetch full email content and store
+ * Stage 2: Run LLM extraction for subscription data
  */
 async function processNewMessage(
     client: GmailClient,
@@ -302,11 +305,11 @@ async function processNewMessage(
     try {
         log(`Processing message: ${messageId}`);
 
+        // Stage 1: Fetch FULL message (including body)
         const fullMessage = await client.gmail.users.messages.get({
             userId: 'me',
             id: messageId,
-            format: 'metadata',
-            metadataHeaders: ['Subject', 'From', 'Date'],
+            format: 'full',
         });
 
         const headers = fullMessage.data.payload?.headers || [];
@@ -315,6 +318,9 @@ async function processNewMessage(
         const dateStr = headers.find(h => h.name === 'Date')?.value;
         const date = dateStr ? new Date(dateStr) : null;
         const snippet = fullMessage.data.snippet || null;
+
+        // Extract full email body
+        const body = extractEmailBody(fullMessage.data.payload);
 
         // Extract sender domain
         let senderDomain: string | null = null;
@@ -328,7 +334,7 @@ async function processNewMessage(
         ) || false;
 
         // Detect if subscription-related
-        const textToCheck = `${subject || ''} ${snippet || ''}`.toLowerCase();
+        const textToCheck = `${subject || ''} ${snippet || ''} ${body || ''}`.toLowerCase();
         const matchedKeywords = SUBSCRIPTION_KEYWORDS.filter(k => textToCheck.includes(k.toLowerCase()));
         const isSubscription = matchedKeywords.length > 0;
 
@@ -339,9 +345,10 @@ async function processNewMessage(
             senderDomain,
             isSubscription,
             matchedKeywords,
+            bodyLength: body?.length || 0,
         });
 
-        // Store in GmailMessage table
+        // Stage 1: Store in GmailMessage table with full body
         await prisma.gmailMessage.create({
             data: {
                 userId,
@@ -351,16 +358,18 @@ async function processNewMessage(
                 sender: from,
                 senderDomain,
                 snippet,
+                body, // NEW: Store full body for LLM extraction
                 date,
                 hasAttachment,
                 isRenewal: isSubscription,
+                isProcessed: false, // Will be set to true after LLM extraction
             },
         });
 
         let subscriptionCreated = false;
         let vendorCreated = false;
 
-        // If subscription detected, create records
+        // Stage 2: If subscription detected, run LLM extraction
         if (isSubscription && senderDomain) {
             const result = await createSubscriptionFromEmail({
                 userId,
@@ -368,11 +377,16 @@ async function processNewMessage(
                 senderDomain,
                 from,
                 subject,
-                snippet,
-                textToCheck,
+                body,
             });
             subscriptionCreated = result.subscriptionCreated;
             vendorCreated = result.vendorCreated;
+
+            // Mark as processed
+            await prisma.gmailMessage.update({
+                where: { gmailId: messageId },
+                data: { isProcessed: true },
+            });
         }
 
         return { subscriptionCreated, vendorCreated };
@@ -383,7 +397,48 @@ async function processNewMessage(
 }
 
 /**
- * Create or update Subscription and Vendor records from email
+ * Extract plain text body from Gmail message payload
+ */
+function extractEmailBody(payload: gmail_v1.Schema$MessagePart | undefined): string | null {
+    if (!payload) return null;
+
+    // Check if this part has a body
+    if (payload.body?.data) {
+        const mimeType = payload.mimeType || '';
+        if (mimeType === 'text/plain' || mimeType === 'text/html') {
+            const decoded = Buffer.from(payload.body.data, 'base64').toString('utf-8');
+            // Strip HTML tags if HTML content
+            if (mimeType === 'text/html') {
+                return decoded.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+            }
+            return decoded;
+        }
+    }
+
+    // Check nested parts
+    if (payload.parts) {
+        // Prefer plain text over HTML
+        const plainPart = payload.parts.find(p => p.mimeType === 'text/plain');
+        if (plainPart) {
+            return extractEmailBody(plainPart);
+        }
+        const htmlPart = payload.parts.find(p => p.mimeType === 'text/html');
+        if (htmlPart) {
+            return extractEmailBody(htmlPart);
+        }
+        // Recursively check other parts
+        for (const part of payload.parts) {
+            const body = extractEmailBody(part);
+            if (body) return body;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Create or update Subscription and Vendor records from email using LLM extraction
+ * This is Stage 2 of the two-stage extraction pipeline
  */
 async function createSubscriptionFromEmail(params: {
     userId: string;
@@ -391,95 +446,113 @@ async function createSubscriptionFromEmail(params: {
     senderDomain: string;
     from: string | null;
     subject: string | null;
-    snippet: string | null;
-    textToCheck: string;
+    body: string | null;
 }): Promise<{ subscriptionCreated: boolean; vendorCreated: boolean }> {
-    const { userId, messageId, senderDomain, from, subject, snippet, textToCheck } = params;
+    const { userId, messageId, senderDomain, from, subject, body } = params;
 
     let vendorCreated = false;
 
-    // Resolve or create vendor
+    // Stage 2: Run LLM extraction
+    log(`Running LLM extraction for message: ${messageId}`);
+    const extracted = await extractSubscriptionFromEmail(subject, body, from);
+
+    // Resolve vendor name using LLM extraction result (NOT sender display name)
+    const { name: vendorName, category: extractedCategory } = resolveVendorName(
+        extracted?.vendor_name || null,
+        senderDomain,
+        subject
+    );
+
+    log(`Resolved vendor`, {
+        vendorName,
+        llmVendorName: extracted?.vendor_name,
+        senderDomain,
+        category: extractedCategory
+    });
+
+    // Generic email domains that shouldn't be used for vendor matching
+    const GENERIC_EMAIL_DOMAINS = [
+        'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+        'aol.com', 'icloud.com', 'mail.com', 'protonmail.com'
+    ];
+    const isGenericDomain = GENERIC_EMAIL_DOMAINS.includes(senderDomain?.toLowerCase() || '');
+
+    // Find or create vendor - prioritize by extracted name, only use domain for company domains
     let vendor = await prisma.vendor.findFirst({
         where: {
-            OR: [
-                { domain: senderDomain },
-                { normalizedName: { contains: senderDomain.split('.')[0] } },
-            ],
+            // Match by normalized vendor name (primary)
+            normalizedName: vendorName.toLowerCase().replace(/\s+/g, ''),
         },
     });
 
+    // If not found by name and we have a real company domain, try matching by domain
+    if (!vendor && senderDomain && !isGenericDomain) {
+        vendor = await prisma.vendor.findFirst({
+            where: { domain: senderDomain },
+        });
+    }
+
     if (!vendor) {
-        // Check known SaaS domains
-        const knownVendor = KNOWN_SAAS_DOMAINS[senderDomain];
+        const category = extractedCategory || getVendorCategory(senderDomain) || 'Uncategorized';
 
-        // Extract vendor name from email "From" field
-        let vendorName = senderDomain.split('.')[0];
-        vendorName = vendorName.charAt(0).toUpperCase() + vendorName.slice(1);
-
-        if (from) {
-            const nameMatch = from.match(/^([^<]+)/);
-            if (nameMatch) {
-                vendorName = nameMatch[1].trim().replace(/"/g, '');
-            }
-        }
+        // For generic domains, use the vendor's actual domain if extracted, otherwise use vendor name
+        const vendorDomain = extracted?.vendor_domain ||
+            (isGenericDomain ? `${vendorName.toLowerCase().replace(/\s+/g, '')}.com` : senderDomain);
 
         vendor = await prisma.vendor.create({
             data: {
-                name: knownVendor?.name || vendorName,
-                normalizedName: (knownVendor?.name || vendorName).toLowerCase().replace(/\s+/g, ''),
-                domain: senderDomain,
-                category: knownVendor?.category || 'Uncategorized',
+                name: vendorName,
+                normalizedName: vendorName.toLowerCase().replace(/\s+/g, ''),
+                domain: vendorDomain,
+                category,
                 isSaaS: true,
             },
         });
 
         log(`Created new vendor`, { id: vendor.id, name: vendor.name, domain: vendor.domain });
         vendorCreated = true;
+    } else {
+        log(`Found existing vendor`, { id: vendor.id, name: vendor.name });
     }
 
-    // Extract amount from text
-    let extractedAmount: number | null = null;
-    const allText = `${subject || ''} ${snippet || ''}`;
-    const amounts = allText.match(AMOUNT_REGEX);
-    if (amounts && amounts.length > 0) {
-        const parsed = parseFloat(amounts[0].replace(/[$,]/g, ''));
-        if (!isNaN(parsed)) {
-            extractedAmount = parsed;
-        }
-    }
-
-    // Extract renewal date
+    // Parse renewal date from LLM extraction
     let renewalDate: Date | null = null;
-    for (const pattern of DATE_PATTERNS) {
-        const match = textToCheck.match(pattern);
-        if (match) {
-            const parsed = new Date(match[0]);
-            if (!isNaN(parsed.getTime()) && parsed > new Date()) {
-                renewalDate = parsed;
-                break;
-            }
+    if (extracted?.renewal_date) {
+        const parsed = new Date(extracted.renewal_date);
+        if (!isNaN(parsed.getTime())) {
+            renewalDate = parsed;
         }
     }
 
-    // Determine billing cycle
-    let billingCycle: string | null = null;
-    if (textToCheck.includes('annual') || textToCheck.includes('yearly')) {
-        billingCycle = 'yearly';
-    } else if (textToCheck.includes('monthly')) {
-        billingCycle = 'monthly';
-    } else if (textToCheck.includes('quarterly')) {
-        billingCycle = 'quarterly';
+    // Get values from LLM extraction
+    const amount = extracted?.amount || null;
+    const billingCycle = extracted?.billing_cycle || null;
+    const plan = extracted?.plan || null;
+    const seats = extracted?.seats || null;
+    const currency = extracted?.currency || 'USD';
+    const confidence = extracted?.confidence || 'low';
+
+    log(`Extracted subscription data`, {
+        vendorName: vendor.name,
+        amount,
+        billingCycle,
+        plan,
+        seats,
+        renewalDate: renewalDate?.toISOString(),
+        confidence,
+    });
+
+    // VALIDATION: Skip creating subscription if no meaningful data extracted
+    // At minimum, we need amount OR renewalDate OR plan to consider it a valid subscription
+    if (!amount && !renewalDate && !plan) {
+        log(`Skipping subscription creation - no meaningful data extracted`, {
+            vendorName: vendor.name,
+            messageId,
+        });
+        return { subscriptionCreated: false, vendorCreated };
     }
 
-    // Determine confidence
-    let confidence = 'low';
-    if (extractedAmount && renewalDate) {
-        confidence = 'high';
-    } else if (extractedAmount || renewalDate) {
-        confidence = 'medium';
-    }
-
-    // Create or update subscription
+    // Create or update subscription with LLM-extracted data
     const subscription = await prisma.subscription.upsert({
         where: {
             userId_vendorId_source: {
@@ -491,8 +564,11 @@ async function createSubscriptionFromEmail(params: {
         update: {
             lastDetectedAt: new Date(),
             renewalDate: renewalDate || undefined,
-            amount: extractedAmount || undefined,
+            amount: amount || undefined,
             billingCycle: billingCycle || undefined,
+            plan: plan || undefined,
+            seats: seats || undefined,
+            currency,
             confidenceScore: confidence,
             gmailMessageId: messageId,
         },
@@ -501,8 +577,11 @@ async function createSubscriptionFromEmail(params: {
             vendorId: vendor.id,
             source: 'gmail',
             renewalDate,
-            amount: extractedAmount,
+            amount,
             billingCycle,
+            plan,
+            seats,
+            currency,
             confidenceScore: confidence,
             gmailMessageId: messageId,
         },
@@ -512,7 +591,9 @@ async function createSubscriptionFromEmail(params: {
         id: subscription.id,
         vendorId: vendor.id,
         vendorName: vendor.name,
-        amount: extractedAmount,
+        amount,
+        plan,
+        seats,
         renewalDate: renewalDate?.toISOString(),
         confidence,
     });

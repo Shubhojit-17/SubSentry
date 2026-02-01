@@ -58,6 +58,8 @@ export async function GET(
                 source: subscription.source,
                 renewalDate: subscription.renewalDate,
                 billingCycle: subscription.billingCycle,
+                plan: subscription.plan,
+                seats: subscription.seats,
                 amount: subscription.amount ? parseFloat(subscription.amount.toString()) : null,
                 currency: subscription.currency,
                 confidenceScore: subscription.confidenceScore,

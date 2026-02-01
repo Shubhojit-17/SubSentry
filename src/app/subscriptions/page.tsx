@@ -15,6 +15,8 @@ interface Subscription {
     source: string;
     renewalDate: string | null;
     billingCycle: string | null;
+    plan: string | null;
+    seats: number | null;
     amount: number | null;
     currency: string;
     confidenceScore: string;
@@ -137,8 +139,8 @@ export default function SubscriptionsPage() {
                         <Link
                             href="/subscriptions"
                             className={`px-4 py-2 rounded-lg text-sm ${!filter
-                                    ? 'bg-primary text-white'
-                                    : 'bg-dark-lighter text-gray-400 hover:text-white'
+                                ? 'bg-primary text-white'
+                                : 'bg-dark-lighter text-gray-400 hover:text-white'
                                 }`}
                         >
                             All
@@ -146,8 +148,8 @@ export default function SubscriptionsPage() {
                         <Link
                             href="/subscriptions?filter=renewing"
                             className={`px-4 py-2 rounded-lg text-sm ${filter === 'renewing'
-                                    ? 'bg-primary text-white'
-                                    : 'bg-dark-lighter text-gray-400 hover:text-white'
+                                ? 'bg-primary text-white'
+                                : 'bg-dark-lighter text-gray-400 hover:text-white'
                                 }`}
                         >
                             Renewing Soon
@@ -232,20 +234,12 @@ export default function SubscriptionsPage() {
                                             </span>
                                         </td>
                                         <td className="px-6 py-4">
-                                            <div className="flex gap-2">
-                                                <Link
-                                                    href={`/subscriptions/${sub.id}`}
-                                                    className="text-primary hover:text-primary-light text-sm"
-                                                >
-                                                    View
-                                                </Link>
-                                                <Link
-                                                    href={`/negotiate?vendorId=${sub.vendorId}`}
-                                                    className="text-gray-400 hover:text-white text-sm"
-                                                >
-                                                    Negotiate
-                                                </Link>
-                                            </div>
+                                            <Link
+                                                href={`/subscriptions/${sub.id}`}
+                                                className="text-primary hover:text-primary-light text-sm"
+                                            >
+                                                View
+                                            </Link>
                                         </td>
                                     </tr>
                                 ))}
