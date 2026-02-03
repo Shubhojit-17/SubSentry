@@ -4,6 +4,8 @@ import { authOptions } from '@/lib/auth';
 import prisma from '@/lib/prisma';
 import { generateNegotiationEmail, NegotiationStrategy, getStrategyDisplayName } from '@/lib/llm';
 import { getRenewalInfo } from '@/lib/renewal-detection';
+import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
+import { validateBody, createNegotiationSchema, updateNegotiationSchema } from '@/lib/validation';
 
 // POST - Generate new negotiation draft
 export async function POST(request: NextRequest) {
@@ -14,16 +16,27 @@ export async function POST(request: NextRequest) {
         }
 
         const userId = (session.user as { id: string }).id;
-        const { vendorId, strategy } = await request.json();
 
-        // Validate strategy
-        const validStrategies: NegotiationStrategy[] = ['seat_reduction', 'tier_downgrade', 'annual_prepay'];
-        if (!validStrategies.includes(strategy)) {
+        // Rate limiting
+        const rateLimit = checkRateLimit(userId, 'negotiate');
+        if (!rateLimit.allowed) {
             return NextResponse.json(
-                { error: 'Invalid strategy. Must be: seat_reduction, tier_downgrade, or annual_prepay' },
+                { error: 'Too many requests', retryAfter: Math.ceil(rateLimit.resetIn / 1000) },
+                { status: 429, headers: rateLimitHeaders(rateLimit) }
+            );
+        }
+
+        // Validate request body
+        const body = await request.json();
+        const validation = validateBody(body, createNegotiationSchema);
+        if (!validation.success) {
+            return NextResponse.json(
+                { error: validation.error, details: validation.details },
                 { status: 400 }
             );
         }
+
+        const { vendorId, strategy } = validation.data;
 
         // Get vendor with transactions
         const vendor = await prisma.vendor.findUnique({
@@ -117,7 +130,18 @@ export async function PUT(request: NextRequest) {
         }
 
         const userId = (session.user as { id: string }).id;
-        const { negotiationId, subject, body, recipientEmail } = await request.json();
+
+        // Validate request body
+        const body = await request.json();
+        const validation = validateBody(body, updateNegotiationSchema);
+        if (!validation.success) {
+            return NextResponse.json(
+                { error: validation.error, details: validation.details },
+                { status: 400 }
+            );
+        }
+
+        const { negotiationId, subject, body: emailBody, recipientEmail } = validation.data;
 
         // Verify ownership
         const negotiation = await prisma.negotiation.findUnique({
@@ -139,7 +163,7 @@ export async function PUT(request: NextRequest) {
         const updated = await prisma.negotiation.update({
             where: { id: negotiationId },
             data: {
-                finalEmail: `Subject: ${subject}\n\n${body}`,
+                finalEmail: `Subject: ${subject}\n\n${emailBody}`,
                 recipientEmail,
                 status: 'approved',
             },

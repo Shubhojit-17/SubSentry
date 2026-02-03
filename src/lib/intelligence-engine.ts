@@ -44,56 +44,104 @@ export interface IntelligenceSnapshot {
 // VENDOR CLASSIFICATION
 // ============================================================================
 
-// Vendors with fixed pricing that typically don't negotiate
-const FIXED_PLAN_VENDORS = [
+// Fallback vendors with fixed pricing that typically don't negotiate
+// These are used only when vendor doesn't have vendorType set in database
+const DEFAULT_FIXED_PLAN_VENDORS = [
     'spotify', 'netflix', 'disney+', 'hulu', 'amazon prime',
     'apple music', 'youtube premium', 'hbo max', 'paramount+',
-    'github', 'gitlab', 'bitbucket', // Developer tools with fixed tiers
-    'notion', 'todoist', 'evernote', // Productivity with fixed plans
-    'canva', 'figma', // Design tools
-    'zoom', 'google workspace', 'microsoft 365', // Fixed tier pricing
 ];
 
-// Vendors known to be negotiable (enterprise sales, custom pricing)
-const NEGOTIABLE_VENDORS = [
+// Fallback vendors known to be negotiable (enterprise sales, custom pricing)
+// Used when vendor vendorType is not set in database
+const DEFAULT_NEGOTIABLE_VENDORS = [
     'salesforce', 'hubspot', 'marketo', 'pardot',
     'workday', 'servicenow', 'snowflake', 'databricks',
     'okta', 'auth0', 'onelogin',
     'datadog', 'splunk', 'new relic', 'dynatrace',
-    'aws', 'azure', 'gcp', 'oracle',
+    'aws', 'azure', 'gcp',
     'sap', 'oracle', 'ibm',
     'zendesk', 'intercom', 'freshdesk',
     'atlassian', 'jira', 'confluence',
-    'slack', 'teams', // Enterprise plans are negotiable
+    'slack', 'teams',
     'docusign', 'adobe', 'autodesk',
+    // Removed items that are actually negotiable at enterprise scale:
+    // github, gitlab, notion, figma, zoom, google workspace, microsoft 365, canva
 ];
 
 /**
  * Classify a vendor as FIXED_PLAN or NEGOTIABLE
+ * Priority: 1) Database vendorType, 2) Fallback lists, 3) Category heuristics, 4) Default to NEGOTIABLE
  */
-export function classifyVendor(vendorName: string, category?: string | null): VendorType {
+export async function classifyVendor(vendorName: string, category?: string | null): Promise<VendorType> {
     const normalized = vendorName.toLowerCase().trim();
 
-    // Check explicit lists first
-    if (FIXED_PLAN_VENDORS.some(v => normalized.includes(v))) {
+    // First, check database for explicit vendorType
+    try {
+        const vendor = await prisma.vendor.findFirst({
+            where: {
+                OR: [
+                    { normalizedName: normalized.replace(/\s+/g, '') },
+                    { name: { contains: vendorName, mode: 'insensitive' } },
+                ],
+            },
+            select: { vendorType: true },
+        });
+
+        if (vendor?.vendorType) {
+            return vendor.vendorType as VendorType;
+        }
+    } catch (error) {
+        console.error('[Intelligence] Error fetching vendor type from DB:', error);
+        // Fall through to fallback logic
+    }
+
+    // Fallback: Check explicit lists (only for obvious consumer subscriptions)
+    if (DEFAULT_FIXED_PLAN_VENDORS.some(v => normalized.includes(v))) {
         return 'FIXED_PLAN';
     }
 
-    if (NEGOTIABLE_VENDORS.some(v => normalized.includes(v))) {
+    if (DEFAULT_NEGOTIABLE_VENDORS.some(v => normalized.includes(v))) {
         return 'NEGOTIABLE';
     }
 
     // Heuristics based on category
     const negotiableCategories = [
         'Enterprise', 'CRM', 'ERP', 'Security', 'Infrastructure',
-        'Analytics', 'Data', 'HR', 'Finance'
+        'Analytics', 'Data', 'HR', 'Finance', 'DevOps', 'Cloud'
     ];
 
     if (category && negotiableCategories.some(c => category.includes(c))) {
         return 'NEGOTIABLE';
     }
 
-    // Default: assume negotiable for B2B SaaS
+    // Default: assume negotiable for B2B SaaS (conservative approach)
+    return 'NEGOTIABLE';
+}
+
+/**
+ * Synchronous version for cases where async is not possible
+ * Uses only fallback lists, not database
+ */
+export function classifyVendorSync(vendorName: string, category?: string | null): VendorType {
+    const normalized = vendorName.toLowerCase().trim();
+
+    if (DEFAULT_FIXED_PLAN_VENDORS.some(v => normalized.includes(v))) {
+        return 'FIXED_PLAN';
+    }
+
+    if (DEFAULT_NEGOTIABLE_VENDORS.some(v => normalized.includes(v))) {
+        return 'NEGOTIABLE';
+    }
+
+    const negotiableCategories = [
+        'Enterprise', 'CRM', 'ERP', 'Security', 'Infrastructure',
+        'Analytics', 'Data', 'HR', 'Finance', 'DevOps', 'Cloud'
+    ];
+
+    if (category && negotiableCategories.some(c => category.includes(c))) {
+        return 'NEGOTIABLE';
+    }
+
     return 'NEGOTIABLE';
 }
 
@@ -386,7 +434,7 @@ export async function getOrCreateIntelligence(
 
     // Generate all intelligence data
     const vendor = subscription.vendor;
-    const vendorType = classifyVendor(vendor.name, vendor.category);
+    const vendorType = await classifyVendor(vendor.name, vendor.category);
 
     const { summary, assumptions } = await generateValueSummary(
         vendor.name,

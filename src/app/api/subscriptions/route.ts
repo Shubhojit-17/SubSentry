@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import prisma from '@/lib/prisma';
+import { checkRateLimit, rateLimitHeaders } from '@/lib/rate-limit';
+import { validateBody, validateSearchParams, createSubscriptionSchema, subscriptionFilterSchema } from '@/lib/validation';
 
 // GET /api/subscriptions - List all subscriptions
 export async function GET(request: NextRequest) {
@@ -13,21 +15,30 @@ export async function GET(request: NextRequest) {
 
         const userId = (session.user as { id: string }).id;
         const { searchParams } = new URL(request.url);
-        const filter = searchParams.get('filter');
+        
+        // Validate query parameters
+        const validation = validateSearchParams(searchParams, subscriptionFilterSchema);
+        const filter = validation.success ? validation.data.filter : searchParams.get('filter');
 
-        let whereClause: Record<string, unknown> = { userId };
+        // Build type-safe where clause
+        interface WhereClause {
+            userId: string;
+            renewalDate?: { gte: Date; lte: Date };
+            status?: string;
+        }
+        
+        const whereClause: WhereClause = { userId };
 
         // Filter for upcoming renewals
         if (filter === 'renewing') {
             const now = new Date();
             const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-            whereClause = {
-                ...whereClause,
-                renewalDate: {
-                    gte: now,
-                    lte: thirtyDaysFromNow,
-                },
+            whereClause.renewalDate = {
+                gte: now,
+                lte: thirtyDaysFromNow,
             };
+        } else if (filter === 'active' || filter === 'cancelled') {
+            whereClause.status = filter;
         }
 
         const subscriptions = await prisma.subscription.findMany({
@@ -80,13 +91,27 @@ export async function POST(request: NextRequest) {
         }
 
         const userId = (session.user as { id: string }).id;
-        const body = await request.json();
 
-        const { vendorName, renewalDate, billingCycle, amount, currency } = body;
-
-        if (!vendorName) {
-            return NextResponse.json({ error: 'Vendor name is required' }, { status: 400 });
+        // Rate limiting
+        const rateLimit = checkRateLimit(userId, 'standard');
+        if (!rateLimit.allowed) {
+            return NextResponse.json(
+                { error: 'Too many requests', retryAfter: Math.ceil(rateLimit.resetIn / 1000) },
+                { status: 429, headers: rateLimitHeaders(rateLimit) }
+            );
         }
+
+        // Validate request body
+        const body = await request.json();
+        const validation = validateBody(body, createSubscriptionSchema);
+        if (!validation.success) {
+            return NextResponse.json(
+                { error: validation.error, details: validation.details },
+                { status: 400 }
+            );
+        }
+
+        const { vendorName, renewalDate, billingCycle, amount, currency } = validation.data;
 
         // Find or create vendor
         let vendor = await prisma.vendor.findFirst({

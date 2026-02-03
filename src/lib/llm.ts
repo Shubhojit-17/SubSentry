@@ -3,6 +3,8 @@
  * Configurable provider: Gemini, OpenAI, or Anthropic
  */
 
+import { withLLMRetry } from './retry';
+
 export type LLMProvider = 'gemini' | 'openai' | 'anthropic';
 export type NegotiationStrategy = 'seat_reduction' | 'tier_downgrade' | 'annual_prepay';
 
@@ -128,7 +130,7 @@ function parseEmailResponse(response: string): { subject: string; body: string }
 }
 
 /**
- * Call Gemini API
+ * Call Gemini API with retry logic
  */
 async function callGemini(prompt: string): Promise<string> {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -136,33 +138,36 @@ async function callGemini(prompt: string): Promise<string> {
         throw new Error('GEMINI_API_KEY not configured');
     }
 
-    const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-        {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: {
-                    temperature: 0.7,
-                    maxOutputTokens: 1024,
+    return withLLMRetry(async () => {
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
                 },
-            }),
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        temperature: 0.7,
+                        maxOutputTokens: 1024,
+                    },
+                }),
+            }
+        );
+
+        if (!response.ok) {
+            const status = response.status;
+            throw new Error(`Gemini API error: ${status} ${response.statusText}`);
         }
-    );
 
-    if (!response.ok) {
-        throw new Error(`Gemini API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    });
 }
 
 /**
- * Call OpenAI API
+ * Call OpenAI API with retry logic
  */
 async function callOpenAI(prompt: string): Promise<string> {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -170,30 +175,33 @@ async function callOpenAI(prompt: string): Promise<string> {
         throw new Error('OPENAI_API_KEY not configured');
     }
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-            model: 'gpt-4o-mini',
-            messages: [{ role: 'user', content: prompt }],
-            temperature: 0.7,
-            max_tokens: 1024,
-        }),
+    return withLLMRetry(async () => {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.7,
+                max_tokens: 1024,
+            }),
+        });
+
+        if (!response.ok) {
+            const status = response.status;
+            throw new Error(`OpenAI API error: ${status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        return data.choices?.[0]?.message?.content || '';
     });
-
-    if (!response.ok) {
-        throw new Error(`OpenAI API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || '';
 }
 
 /**
- * Call Anthropic API
+ * Call Anthropic API with retry logic
  */
 async function callAnthropic(prompt: string): Promise<string> {
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -201,26 +209,29 @@ async function callAnthropic(prompt: string): Promise<string> {
         throw new Error('ANTHROPIC_API_KEY not configured');
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-            model: 'claude-3-haiku-20240307',
-            max_tokens: 1024,
-            messages: [{ role: 'user', content: prompt }],
-        }),
+    return withLLMRetry(async () => {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify({
+                model: 'claude-3-haiku-20240307',
+                max_tokens: 1024,
+                messages: [{ role: 'user', content: prompt }],
+            }),
+        });
+
+        if (!response.ok) {
+            const status = response.status;
+            throw new Error(`Anthropic API error: ${status} ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        return data.content?.[0]?.text || '';
     });
-
-    if (!response.ok) {
-        throw new Error(`Anthropic API error: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return data.content?.[0]?.text || '';
 }
 
 /**
